@@ -1,15 +1,142 @@
-"""Assemble the static pages for Topography Consulting (shared header/footer)."""
-import os, re, sys
-SITE = sys.argv[1]
-URL = "https://www.topographyllc.com"
+"""Assemble the static pages for Topography Consulting LLC.
 
-ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>'
+Usage (from the repo root):
+    python3 tools/build.py site                                   # staging (default)
+    SITE_ENV=production SITE_URL=https://www.topographyllc.com python3 tools/build.py site
 
-FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-         '<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..500;1,9..144,300..500'
-         '&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Montserrat:wght@500;700&display=swap" rel="stylesheet">')
+Staging builds (the default) emit `noindex`, a robots.txt that disallows all
+crawling, no canonical URLs and no sitemap, so a preview URL never competes
+with the real site in search results. Production builds require SITE_URL and
+emit canonical/Open Graph URLs, an indexable robots.txt and sitemap.xml.
 
-def head(title, desc, path, image="assets/img/hero-wave.jpg", extra=""):
+FORM_ENDPOINT: leave empty until a form service (e.g. Formspree) has been
+approved, configured and tested. While empty, the contact form composes an
+email in the visitor's mail app and says so; it never claims to send anything.
+"""
+import glob, json, os, re, sys
+
+SITE = sys.argv[1] if len(sys.argv) > 1 else "site"
+ENV = os.environ.get("SITE_ENV", "staging").strip().lower()
+URL = os.environ.get("SITE_URL", "").strip().rstrip("/")
+FORM_ENDPOINT = os.environ.get("FORM_ENDPOINT", "").strip()
+if ENV not in ("staging", "production"):
+    sys.exit("SITE_ENV must be 'staging' or 'production'")
+if ENV == "production" and not URL.startswith("https://"):
+    sys.exit("Production builds need SITE_URL, e.g. SITE_URL=https://www.topographyllc.com")
+PROD = ENV == "production"
+
+EMAIL = "marcie@topographyllc.com"
+PHONE_DISPLAY = "+1 805-331-0740"
+PHONE_HREF = "+18053310740"
+YEAR = 2026
+
+ARROW = ('<svg class="i-arrow" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" '
+         'stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M4 12h15M13 6l6 6-6 6"/></svg>')
+
+
+# ---------------------------------------------------------------------------
+# Images: <picture> with WebP srcset + original JPEG fallback
+# ---------------------------------------------------------------------------
+def _dims(name):
+    with open(os.path.join(SITE, "assets/img", name + ".jpg"), "rb") as f:
+        data = f.read()
+    i = 2
+    while i < len(data):
+        if data[i] != 0xFF: i += 1; continue
+        marker = data[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            h = int.from_bytes(data[i + 5:i + 7], "big"); w = int.from_bytes(data[i + 7:i + 9], "big")
+            return w, h
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    raise ValueError(name)
+
+
+def pic(name, alt, sizes, cls="", eager=False, pos=None):
+    w, h = _dims(name)
+    widths = sorted(int(re.search(r"-(\d+)\.webp$", p).group(1))
+                    for p in glob.glob(os.path.join(SITE, "assets/img/opt", name + "-*.webp")))
+    srcset = ", ".join(f"assets/img/opt/{name}-{x}.webp {x}w" for x in widths)
+    load = 'fetchpriority="high" decoding="async"' if eager else 'loading="lazy" decoding="async"'
+    style = f' style="object-position:{pos}"' if pos else ""
+    c = f' class="{cls}"' if cls else ""
+    return (f'<picture><source type="image/webp" srcset="{srcset}" sizes="{sizes}">'
+            f'<img{c} src="assets/img/{name}.jpg" alt="{alt}" width="{w}" height="{h}" {load}{style}></picture>')
+
+
+# ---------------------------------------------------------------------------
+# Logo: split the approved vector into its drawn elements (no geometry change)
+# ---------------------------------------------------------------------------
+LOGO = open(os.path.join(SITE, "assets/logo/Topography-Logo-White-Knockout.svg")).read()
+LOGO_VIEWBOX = re.search(r'viewBox="([^"]+)"', LOGO).group(1)
+_icon_d, _word_d = re.findall(r' d="([^"]+)"', LOGO)
+_subs = [s.strip() for s in re.split(r"(?=M)", _icon_d) if s.strip()]
+assert len(_subs) == 20, "Logo structure changed: re-check the subpath grouping below"
+
+# Subpath indices, in drawing order of the approved file. Holes stay with the
+# shape they cut (compass 11 + 12-16, bottom wave 0 + 1) so even-odd fill
+# renders exactly as the original.
+GROUPS = [
+    ("waves",     [[0, 1], [2], [3]]),
+    ("mountains", [[4], [5], [8]]),
+    ("summit",    [[9], [10]]),
+    ("compass",   [[11, 12, 13, 14, 15, 16]]),
+    ("ring",      [[17], [18], [7], [6], [19]]),
+]
+_used = sorted(i for _, parts in GROUPS for p in parts for i in p)
+assert _used == list(range(20)), "every logo subpath must be used exactly once"
+
+
+def mark_svg():
+    groups = []
+    for name, parts in GROUPS:
+        paths = "".join(f'<path d="{" ".join(_subs[i] for i in p)}"/>' for p in parts)
+        groups.append(f'<g class="mark__g" data-g="{name}">{paths}</g>')
+    # The route: a thin line through the centre of the emblem, from the sea to
+    # the north point. Hidden unless the animation runs.
+    route = ('<path class="mark__route" d="M512.5 648 C 505 606 520 566 512.5 528 S 505 456 512.5 418 '
+             'S 520 330 512.5 268" pathLength="1"/>')
+    return (f'<svg class="mark" viewBox="{LOGO_VIEWBOX}" role="img" aria-labelledby="mark-title" data-mark data-anim="pending">'
+            f'<title id="mark-title">Topography Consulting LLC</title>'
+            f'<g class="mark__art" fill="#FFFFFF" fill-rule="evenodd">{"".join(groups)}</g>'
+            f'{route}'
+            f'<g class="mark__word" fill="#FFFFFF" fill-rule="evenodd"><path d="{_word_d}"/></g></svg>')
+
+
+def write_lockups():
+    """Horizontal header lockup built from the approved emblem and wordmark
+    vectors (same paths, placed side by side). Flagged for client approval."""
+    s = 170 / 474.6
+    word_w, word_h = 848.4 - 176.0, 801.2 - 676.0
+    gap = 44
+    vw = round(170 + gap + word_w, 1)
+    for variant, icon_fill, word_fill, defs in [
+        ("White", "#FFFFFF", "#FFFFFF", ""),
+        ("Color", "url(#g)", "#0A3F68",
+         '<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="232" x2="0" y2="549">'
+         '<stop offset="0" stop-color="#215A39"/><stop offset="0.45" stop-color="#1C5246"/>'
+         '<stop offset="1" stop-color="#094368"/></linearGradient></defs>'),
+    ]:
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw} 170">{defs}'
+               f'<g transform="scale({s:.5f}) translate(-270.9 -189.4)"><path fill="{icon_fill}" fill-rule="evenodd" d="{_icon_d}"/></g>'
+               f'<g transform="translate({170 + gap - 176.0:.1f} {(170 - word_h) / 2 - 676.0:.1f})"><path fill="{word_fill}" fill-rule="evenodd" d="{_word_d}"/></g></svg>')
+        open(os.path.join(SITE, f"assets/logo/Topography-Lockup-Horizontal-{variant}.svg"), "w").write(svg)
+    return vw
+
+
+LOCKUP_W = write_lockups()
+
+
+# ---------------------------------------------------------------------------
+# Shared page parts
+# ---------------------------------------------------------------------------
+def head(title, desc, path, extra="", preload=""):
+    if PROD:
+        abs_url = f"{URL}/{path}"
+        seo = (f'<link rel="canonical" href="{abs_url}">\n<meta property="og:url" content="{abs_url}">\n'
+               f'<meta property="og:image" content="{URL}/assets/logo/og-logo.png">\n')
+    else:
+        seo = ('<meta name="robots" content="noindex, nofollow">\n'
+               '<meta property="og:image" content="assets/logo/og-logo.png">\n')
     return f'''<!doctype html>
 <html lang="en" class="no-js">
 <head>
@@ -17,627 +144,459 @@ def head(title, desc, path, image="assets/img/hero-wave.jpg", extra=""):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <meta name="description" content="{desc}">
-<link rel="canonical" href="{URL}/{path}">
-<meta name="theme-color" content="#0E2836">
+{seo}<meta name="theme-color" content="#0E2836">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Topography Consulting LLC">
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{desc}">
-<meta property="og:url" content="{URL}/{path}">
-<meta property="og:image" content="{URL}/{image}">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-{FONTS}
-<link rel="stylesheet" href="assets/css/styles.css">
+<link rel="preload" href="assets/fonts/cormorant-garamond-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
+{preload}<link rel="stylesheet" href="assets/css/styles.css">
+<script>document.documentElement.classList.replace("no-js","js")</script>
 {extra}
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 '''
 
+
 def header(active):
-    def a(href, label, key):
-        cur = ' aria-current="page"' if key == active else ''
-        return f'<a href="{href}"{cur}>{label}</a>'
-    return f'''<header class="site-header">
-  <div class="wrap">
-    <a class="brand" href="index.html" aria-label="Topography Consulting LLC — home">
-      <img class="logo-light" src="assets/logo/Topography-Icon-White-Knockout.svg" alt="" width="46" height="46">
-      <img class="logo-dark" src="assets/logo/Topography-Icon-Color.svg" alt="" width="46" height="46">
-      <span class="brand-text"><strong>TOPOGRAPHY</strong><span>CONSULTING LLC</span></span>
+    def item(href, label, key):
+        cur = ' aria-current="page"' if key == active else ""
+        return f'<li><a href="{href}"{cur}>{label}</a></li>'
+    cur_contact = ' aria-current="page"' if active == "contact" else ""
+    return f'''<header class="site-header" data-header>
+  <div class="wrap site-header__inner">
+    <a class="brand" href="index.html" aria-label="Topography Consulting LLC, home">
+      <img src="assets/logo/Topography-Lockup-Horizontal-White.svg" alt="" width="{LOCKUP_W:.0f}" height="170">
     </a>
-    <button class="nav-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="site-nav"><span></span><span></span><span></span></button>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+      <span class="visually-hidden">Menu</span><i aria-hidden="true"></i><i aria-hidden="true"></i>
+    </button>
     <nav class="nav" id="site-nav" aria-label="Primary">
-      {a("services.html", "Services", "services")}
-      {a("services.html#approach", "Approach", "approach")}
-      {a("about.html", "About", "about")}
-      <a class="btn" href="contact.html"{' aria-current="page"' if active == "contact" else ''}>Contact</a>
+      <ul>
+        {item("index.html", "Home", "home")}
+        {item("services.html", "Services", "services")}
+        {item("about.html", "About", "about")}
+      </ul>
+      <a class="btn btn--line nav__cta" href="contact.html"{cur_contact}>Contact</a>
     </nav>
   </div>
 </header>
-<div class="gauge" aria-hidden="true"><div class="gauge__track"><i class="gauge__mark"></i></div><span class="gauge__val">DEPTH 0000 M</span></div>
 '''
 
-FOOTER = '''<footer class="site-footer on-dark">
-  <div class="contours contours--soft" aria-hidden="true"></div>
-  <div class="wrap">
-    <div class="footer-top">
-      <div class="footer-brand">
-        <img src="assets/logo/Topography-Logo-White-Knockout.svg" alt="Topography Consulting LLC" width="220" height="192" loading="lazy">
-        <p>Environmental Compliance Solutions</p>
-      </div>
-      <div>
-        <h4>Navigate</h4>
-        <ul>
-          <li><a href="services.html">Services</a></li>
-          <li><a href="services.html#approach">Approach</a></li>
-          <li><a href="about.html">About</a></li>
-          <li><a href="contact.html">Contact</a></li>
-        </ul>
-      </div>
-      <div>
-        <h4>Focus</h4>
-        <ul>
-          <li><a href="services.html#ballast-water">Ballast water</a></li>
-          <li><a href="services.html#biofouling">Biofouling</a></li>
-          <li><a href="services.html#programs">Compliance programs</a></li>
-          <li><a href="services.html#approvals">BWMS approvals</a></li>
-        </ul>
-      </div>
-      <div>
-        <h4>Contact</h4>
-        <ul>
-          <li><a href="mailto:marcie@topographyllc.com">marcie@topographyllc.com</a></li>
-          <li><a href="tel:+18053310740">+1 805-331-0740</a></li>
-          <li><address>P.O. Box 20014<br>Sedona, AZ 86341</address></li>
-        </ul>
-      </div>
+
+FOOTER = f'''<footer class="site-footer">
+  <div class="wrap site-footer__top">
+    <div class="site-footer__brand">
+      <img src="assets/logo/Topography-Logo-White-Knockout.svg" alt="Topography Consulting LLC" width="152" height="132" loading="lazy">
+      <p>Environmental Compliance Solutions</p>
     </div>
-    <div class="footer-bottom">
-      <span>&copy; <span data-year>2026</span> Topography Consulting LLC. All rights reserved.</span>
-      <span class="coord">34.8697&deg; N &middot; 111.7610&deg; W &mdash; Serving clients worldwide</span>
+    <nav class="site-footer__nav" aria-label="Footer">
+      <ul>
+        <li><a href="index.html">Home</a></li>
+        <li><a href="services.html">Services</a></li>
+        <li><a href="about.html">About</a></li>
+        <li><a href="contact.html">Contact</a></li>
+      </ul>
+    </nav>
+    <div class="site-footer__contact">
+      <a href="mailto:{EMAIL}">{EMAIL}</a>
+      <a href="tel:{PHONE_HREF}">{PHONE_DISPLAY}</a>
+      <p>Sedona, Arizona<br>Serving clients globally</p>
     </div>
   </div>
+  <div class="wrap site-footer__base">
+    <p>&copy; <span data-year>{YEAR}</span> Topography Consulting LLC</p>
+  </div>
+  <div class="site-footer__contours" aria-hidden="true"></div>
 </footer>
 <script src="assets/js/main.js" defer></script>
 </body>
 </html>
 '''
 
-def cta(title='Where is your <em>compliance</em> headed?', text="Tell us about the vessel, the system or the regulation in front of you. Every engagement starts with listening."):
-    return f'''<section class="section section--dark on-dark cta">
+
+def cta(tone="forest", title="Let&rsquo;s discuss your compliance needs.",
+        text="Practical guidance for the environmental challenges facing the maritime industry."):
+    return f'''<section class="section cta cta--{tone} on-dark">
   <div class="contours" aria-hidden="true"></div>
-  <div class="wrap">
-    <p class="label reveal">Start a conversation</p>
-    <div class="cta__row">
-      <div>
-        <h2 class="display reveal">{title}</h2>
-        <p class="lede reveal" style="--d:.1s">{text}</p>
-      </div>
-      <div class="reveal" style="--d:.2s">
-        <div class="cta__details mb-0">
-          <a href="mailto:marcie@topographyllc.com">marcie@topographyllc.com</a>
-          <a href="tel:+18053310740">+1 805-331-0740</a>
-        </div>
-        <p class="mt-2 mb-0"><a class="btn" href="contact.html">Get in touch {ARROW}</a></p>
-      </div>
-    </div>
+  <div class="wrap cta__inner">
+    <h2 class="h2 reveal">{title}</h2>
+    <p class="lead reveal">{text}</p>
+    <p class="reveal"><a class="btn" href="contact.html">Get in Touch {ARROW}</a></p>
   </div>
 </section>
 '''
 
-# ---- inline peak figure (compass ring + draw-on contours) ----
-peak = open(os.path.join(SITE, "assets/img/contours-peak.svg")).read()
-paths = re.findall(r'<path[^>]*/>', peak)
-paths = [p.replace('/>', ' stroke="currentColor"/>') for p in paths]
-ticks = []
-import math
-for deg in range(0, 360, 5):
-    r1 = 368 if deg % 45 else 352
-    if deg % 90 == 0: r1 = 340
-    a = math.radians(deg)
-    ticks.append(f'<line class="tick" x1="{400+r1*math.sin(a):.1f}" y1="{400-r1*math.cos(a):.1f}" x2="{400+378*math.sin(a):.1f}" y2="{400-378*math.cos(a):.1f}" stroke-width="{1.2 if deg%90==0 else .7}"/>')
-PEAK_FIG = f'''<figure class="figure-peak reveal" aria-hidden="true">
-  <svg viewBox="0 0 800 800" fill="none">
-    <defs><clipPath id="disc"><circle cx="400" cy="400" r="330"/></clipPath></defs>
-    <circle class="ring" cx="400" cy="400" r="378"/>
-    <circle class="ring" cx="400" cy="400" r="330"/>
-    {''.join(ticks)}
-    <text class="cardinal" x="400" y="14" text-anchor="middle">N</text>
-    <text class="cardinal" x="794" y="405" text-anchor="end">E</text>
-    <text class="cardinal" x="400" y="798" text-anchor="middle">S</text>
-    <text class="cardinal" x="6" y="405">W</text>
-    <g class="contour-art draw" clip-path="url(#disc)" stroke-linecap="round" stroke-linejoin="round">{''.join(paths)}</g>
-  </svg>
-</figure>'''
+
+# ---------------------------------------------------------------------------
+# Structured data (facts supplied by the client only)
+# ---------------------------------------------------------------------------
+def jsonld():
+    data = {
+        "@context": "https://schema.org", "@type": "ProfessionalService",
+        "name": "Topography Consulting LLC", "slogan": "Environmental Compliance Solutions",
+        "email": EMAIL, "telephone": "+1-805-331-0740",
+        "address": {"@type": "PostalAddress", "addressLocality": "Sedona", "addressRegion": "AZ", "addressCountry": "US"},
+        "areaServed": "Worldwide",
+        "founder": {"@type": "Person", "name": "Marcie M. Merksamer"},
+        "knowsAbout": ["Maritime environmental compliance", "Ballast water management",
+                       "IMO Ballast Water Management Convention", "US Coast Guard ballast water regulations",
+                       "EPA Vessel General Permit", "Biofouling management", "Hull biofouling",
+                       "Aquatic invasive species", "Marine biosecurity"],
+    }
+    if PROD:
+        data["url"] = URL + "/"
+        data["logo"] = URL + "/assets/logo/og-logo.png"
+    return '<script type="application/ld+json">' + json.dumps(data, separators=(",", ":")) + "</script>"
+
 
 # =====================================================================
 # HOME
 # =====================================================================
-jsonld = '''<script type="application/ld+json">
-{"@context":"https://schema.org","@type":"ProfessionalService","name":"Topography Consulting LLC","slogan":"Environmental Compliance Solutions",
-"url":"https://www.topographyllc.com/","logo":"https://www.topographyllc.com/assets/logo/og-logo.png","email":"marcie@topographyllc.com","telephone":"+1-805-331-0740",
-"address":{"@type":"PostalAddress","postOfficeBoxNumber":"20014","addressLocality":"Sedona","addressRegion":"AZ","postalCode":"86341","addressCountry":"US"},
-"areaServed":"Worldwide","founder":{"@type":"Person","name":"Marcie M. Merksamer","jobTitle":"Founder"},
-"knowsAbout":["Ballast water management","IMO Ballast Water Management Convention","US Coast Guard ballast water regulations","EPA Vessel General Permit","Biofouling management","Hull biofouling","Aquatic invasive species","Marine biosecurity","Maritime environmental compliance"]}
-</script>'''
+SERVICES_INDEX = [
+    ("ballast-water", "Ballast Water Management", "port-ship", "60% 50%",
+     "Guidance on the IMO Ballast Water Management Convention, US Coast Guard regulations and the EPA Vessel General Permit, from management plans to day-to-day compliance."),
+    ("biofouling", "Biofouling Management", "reef-wall", "40% 50%",
+     "Practical preparation for hull biofouling requirements as international regulations develop, informed by direct involvement in that work."),
+    ("regulatory", "Regulatory Compliance", "open-ocean", "50% 50%",
+     "Clear answers on IMO, USCG, EPA, national, regional and classification society requirements, from someone who takes part at the IMO."),
+    ("programs", "Compliance Programs and Project Management", "coast-aerial", "50% 60%",
+     "Compliance programs, training and monitoring for ships, managed from scope to completion."),
+]
 
-home = head("Topography Consulting | Ballast Water & Biofouling Compliance",
-            "Specialized maritime environmental compliance consulting for ballast water management and biofouling management — IMO, USCG and EPA requirements, compliance programs and BWMS approvals.",
-            "", extra=jsonld) + header("home") + f'''
+svc_rows = "".join(f'''
+        <li class="svc__item reveal" data-svc="{i}">
+          <a class="svc__link" href="services.html#{key}">
+            <h3 class="svc__title">{title}</h3>
+            <p class="svc__text">{text}</p>
+            <span class="svc__more">Learn more {ARROW}</span>
+          </a>
+        </li>''' for i, (key, title, img, pos, text) in enumerate(SERVICES_INDEX))
+svc_media = "".join(f'''
+        <div class="svc__img{' is-active' if i == 0 else ''}" data-svc-img="{i}">{pic(img, "", "(min-width: 1000px) 40vw, 1px", pos=pos)}</div>'''
+                    for i, (key, title, img, pos, text) in enumerate(SERVICES_INDEX))
+
+home = head("Topography Consulting | Maritime Environmental Compliance",
+            "Ballast water management, biofouling management and maritime environmental compliance consulting. IMO, USCG and EPA expertise from an independent consultant with 26 years in the field.",
+            "", extra=jsonld(),
+            preload='<link rel="preload" as="image" type="image/webp" href="assets/img/opt/ocean-surface-1200.webp" imagesrcset="assets/img/opt/ocean-surface-640.webp 640w, assets/img/opt/ocean-surface-1200.webp 1200w, assets/img/opt/ocean-surface-2000.webp 2000w" imagesizes="100vw" fetchpriority="high">\n'
+            ) + header("home") + f'''
 <main id="main">
-<section class="hero on-dark">
-  <div class="hero__media"><img data-parallax="0.12" src="assets/img/hero-wave.jpg" alt="An ocean swell rising at dusk beneath copper-lit clouds" width="2400" height="1600" fetchpriority="high"></div>
-  <div class="contours" aria-hidden="true"></div>
-  <div class="wrap hero__inner">
-    <div class="hero-in">
-      <p class="label">Environmental Compliance Solutions</p>
-      <h1 class="display">Charting a clear course to <em>compliance.</em></h1>
-      <div class="hero__row">
-        <p class="lede mb-0">Specialized consulting in ballast water and biofouling management, helping the maritime industry meet global biosecurity regulations and control the spread of aquatic invasive species.</p>
-        <div class="hero__actions">
-          <a class="btn" href="services.html">Explore services {ARROW}</a>
-          <a class="btn btn--ghost" href="contact.html">Start a conversation</a>
-        </div>
-      </div>
-      <div class="hero__meta coord">
-        <span>IMO &middot; USCG &middot; EPA &middot; Classification societies</span>
-        <span class="scroll-cue"><i></i>Scroll</span>
+<section class="hero hero--home on-dark" data-hero>
+  <div class="hero__media">{pic("ocean-surface", "", "100vw", eager=True, pos="50% 70%")}</div>
+  <div class="hero__field" aria-hidden="true"><div class="hero__rings" data-rings></div></div>
+  <div class="wrap hero__grid">
+    <div class="hero__copy">
+      <p class="eyebrow">Environmental Compliance Solutions</p>
+      <h1 class="display">Navigating complexity. <em>Charting solutions.</em></h1>
+      <p class="hero__lede">Specialized environmental compliance consulting for the global maritime industry.</p>
+      <div class="actions">
+        <a class="btn" href="services.html">Explore Our Services {ARROW}</a>
+        <a class="link" href="contact.html">Get in Touch</a>
       </div>
     </div>
+    <div class="hero__mark">{mark_svg()}</div>
   </div>
 </section>
 
-<section class="section">
-  <div class="wrap">
-    <div class="section-head">
-      <div>
-        <p class="label reveal">The practice</p>
-        <h2 class="h2 reveal">A specialist firm for a <em>specialist</em> problem.</h2>
-      </div>
-      <p class="lede reveal" style="--d:.1s">Normal shipping operations can move aquatic organisms around the world without anyone noticing. Topography Consulting helps the people who build, operate and regulate ships manage that biosecurity risk with precision.</p>
-    </div>
-    <div class="readouts">
-      <div class="readout reveal"><b>26<sup>YRS</sup></b><span>focused on ballast water management and aquatic invasive species</span></div>
-      <div class="readout reveal" style="--d:.08s"><b>24<sup>YRS</sup></b><span>as an independent environmental consultant in the maritime sector</span></div>
-      <div class="readout reveal" style="--d:.16s"><b>IMO</b><span>participant at the International Maritime Organization, tracking global biosecurity developments</span></div>
-      <div class="readout reveal" style="--d:.24s"><b>Global</b><span>practice, with connections across the regulatory and scientific communities and a worldwide network of service providers</span></div>
-    </div>
-  </div>
-</section>
-
-<section class="section section--sand">
-  <div class="wrap grid-2">
-    {PEAK_FIG}
+<section class="section intro">
+  <div class="intro__trace" aria-hidden="true"></div>
+  <div class="wrap intro__grid">
+    <h2 class="h2 reveal">A clearer path to compliance.</h2>
     <div>
-      <p class="label reveal">Why &ldquo;Topography&rdquo;</p>
-      <h2 class="h2 reveal">The lines on a map <em>tell a story.</em></h2>
-      <p class="reveal">Contour lines show where the peaks and valleys are, how steep the climb will be, where the water lies and where the coastline offers safe harbor. They also show that there is more than one way to reach a destination: over, under, around or through.</p>
-      <p class="reveal">That is how we approach compliance. We learn the terrain of each client&rsquo;s operation, listen for the pinch points, and then lead the way through the regulations, from the summit of policy down to the deck of the ship.</p>
-      <blockquote class="pull reveal">&ldquo;No problems; only solutions.&rdquo;<cite>Marcie Merksamer, Founder</cite></blockquote>
+      <p class="lead reveal">Topography Consulting helps the maritime industry navigate complex environmental regulations through specialized expertise, practical guidance and solutions tailored to each client.</p>
+      <ul class="facts reveal">
+        <li><strong>26 years</strong><span>of specialized experience</span></li>
+        <li><strong>Global</strong><span>regulatory expertise</span></li>
+        <li><strong>Independent</strong><span>environmental consulting</span></li>
+      </ul>
     </div>
   </div>
 </section>
 
-<section class="section">
+<section class="section section--navy on-dark services-index">
   <div class="wrap">
-    <div class="section-head">
-      <div>
-        <p class="label reveal">Core specializations</p>
-        <h2 class="h2 reveal">Two disciplines. <em>One</em> objective.</h2>
-      </div>
-      <p class="lede reveal" style="--d:.1s">Ballast water and biofouling are the two main ways ships carry aquatic invasive species. They are what we work on, and what we know best.</p>
+    <div class="split-head">
+      <h2 class="h2 reveal">Areas of expertise</h2>
+      <p class="reveal">Ballast water and hull biofouling are the main ways ships carry aquatic invasive species. That is where we focus.</p>
     </div>
-    <div class="panels">
-      <a class="panel reveal" href="services.html#ballast-water">
-        <img src="assets/img/port-ship.jpg" alt="A loaded container ship berthed beneath gantry cranes" width="1800" height="1200" loading="lazy">
-        <span class="coord">01 / Ballast water</span>
-        <h3>Ballast Water Management</h3>
-        <p>Compliance with the IMO Ballast Water Management Convention, US Coast Guard rules, the EPA Vessel General Permit and national, regional and class requirements.</p>
-        <span class="link-arrow">Ballast water services {ARROW}</span>
-      </a>
-      <a class="panel reveal" style="--d:.12s" href="services.html#biofouling">
-        <img src="assets/img/reef.jpg" alt="Divers beside a dense school of fish on a reef wall" width="1600" height="1067" loading="lazy">
-        <span class="coord">02 / Biofouling</span>
-        <h3>Biofouling Management</h3>
-        <p>Practical preparation for the international biofouling management framework now taking shape, with direct involvement in how those regulations are developed.</p>
-        <span class="link-arrow">Biofouling services {ARROW}</span>
-      </a>
-    </div>
-  </div>
-</section>
-
-<section class="section section--ocean on-dark">
-  <div class="contours contours--soft" aria-hidden="true"></div>
-  <div class="wrap">
-    <div class="section-head">
-      <div>
-        <p class="label reveal">Services</p>
-        <h2 class="h2 reveal">From regulation to <em>the ship.</em></h2>
-      </div>
-      <p class="lede reveal" style="--d:.1s">Every engagement is scoped to the project, so you get the expertise you need without paying for the parts you don&rsquo;t.</p>
-    </div>
-    <ul class="legend">
-      <li class="reveal"><a href="services.html#ballast-water"><span class="n">01</span><h3>Regulatory compliance support</h3><p>Ballast water and biofouling requirements under IMO, USCG, EPA, national and regional bodies, and classification societies.</p><span class="arrow">{ARROW}</span></a></li>
-      <li class="reveal"><a href="services.html#programs"><span class="n">02</span><h3>Compliance program development</h3><p>Ballast water management plans, contingency planning, compliance monitoring programs and crew training.</p><span class="arrow">{ARROW}</span></a></li>
-      <li class="reveal"><a href="services.html#management"><span class="n">03</span><h3>Program &amp; project management</h3><p>Hands-on management of compliance programs and projects from scoping through to closeout.</p><span class="arrow">{ARROW}</span></a></li>
-      <li class="reveal"><a href="services.html#approvals"><span class="n">04</span><h3>BWMS approvals &amp; risk assessment</h3><p>Type approval support, aquatic toxicology, and environmental and human health risk assessment for chemical-based systems.</p><span class="arrow">{ARROW}</span></a></li>
-      <li class="reveal"><a href="services.html#intelligence"><span class="n">05</span><h3>Regulatory insight &amp; access</h3><p>A subject matter expert who takes part at the IMO and has a global network across regulators, scientists and industry.</p><span class="arrow">{ARROW}</span></a></li>
-    </ul>
-  </div>
-</section>
-
-<section class="band on-dark">
-  <img data-parallax="0.1" src="assets/img/cliffs-mist.jpg" alt="Green sea cliffs falling to the coast as morning mist lifts off the ridgeline" width="2000" height="1333" loading="lazy">
-  <div class="wrap">
-    <blockquote class="reveal">From the mountains to the sea, and every environment in between.</blockquote>
-    <span class="coord reveal">Protect &middot; Explore &middot; Preserve</span>
-  </div>
-</section>
-
-<section class="section section--dark on-dark">
-  <div class="contours" aria-hidden="true"></div>
-  <div class="wrap">
-    <div class="section-head">
-      <div>
-        <p class="label reveal">Range of experience</p>
-        <h2 class="h2 reveal">From the boiler suit to the <em>business suit.</em></h2>
-      </div>
-      <p class="lede reveal" style="--d:.1s">We have done the work at every level, so our advice holds up on deck, in the lab and in front of the regulator.</p>
-    </div>
-    <div class="range">
-      <div class="range__line"></div>
-      <div class="range__stops">
-        <div class="reveal"><span class="coord">Onboard</span><b>Service technician</b><span>Logistics of scientific BWMS testing on working ships, including system operation, maintenance and crew interaction.</span></div>
-        <div class="reveal" style="--d:.1s"><span class="coord">Laboratory</span><b>Environmental scientist</b><span>Aquatic toxicology and risk assessment of chemical disinfection by-products.</span></div>
-        <div class="reveal" style="--d:.2s"><span class="coord">Approvals</span><b>Regulatory specialist</b><span>Dossiers, data analysis and agency interactions for system approvals worldwide.</span></div>
-        <div class="reveal" style="--d:.3s"><span class="coord">Policy</span><b>Global expert</b><span>Represents industry on the delegation to the International Maritime Organization.</span></div>
+    <div class="svc" data-svc-root>
+      <ol class="svc__list">{svc_rows}
+      </ol>
+      <div class="svc__media" aria-hidden="true">{svc_media}
       </div>
     </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="wrap">
-    <div class="section-head">
-      <div>
-        <p class="label reveal">Who we serve</p>
-        <h2 class="h2 reveal">Bringing every <em>stakeholder</em> to the same chart.</h2>
-      </div>
-      <p class="lede reveal" style="--d:.1s">Compliance works best when everyone involved, including technology developers, regulators and the people who sail the ships, works from the same information.</p>
-    </div>
-    <div class="audience">
-      <div class="reveal"><h3>Shipowners &amp; operators</h3><p>Clear, cost-effective paths to meeting ballast water and biofouling obligations across every port of call.</p></div>
-      <div class="reveal" style="--d:.06s"><h3>Technology developers</h3><p>Expert support through type approval, testing and the scientific questions regulators ask.</p></div>
-      <div class="reveal" style="--d:.12s"><h3>Equipment manufacturers</h3><p>Regulatory insight that shapes product strategy, documentation and market entry.</p></div>
-      <div class="reveal"><h3>Maritime service providers</h3><p>Alignment with current requirements, and early warning of the requirements that are coming.</p></div>
-      <div class="reveal" style="--d:.06s"><h3>Regulatory bodies</h3><p>Technical expertise and industry perspective for the development of practical, science-based rules.</p></div>
-      <div class="reveal" style="--d:.12s"><h3>Industry associations</h3><p>Including the Biosecurity &amp; Environmental Marine Association (BEMA), a client of Topography Consulting.</p></div>
+<section class="section founder">
+  <div class="wrap founder__grid">
+    <figure class="founder__portrait reveal">
+      {pic("marcie-merksamer", "Marcie Merksamer, founder of Topography Consulting", "(min-width: 900px) 300px, 60vw")}
+    </figure>
+    <div class="founder__text">
+      <h2 class="h2 reveal">Experience grounded in the real world.</h2>
+      <p class="reveal">Marcie Merksamer is an environmental biologist who has worked on ballast water management and aquatic invasive species for 26 years. Her work runs from onboard system testing and crew training to type-approval dossiers, toxicology and risk assessment, and regulatory work at the International Maritime Organization.</p>
+      <blockquote class="quote reveal"><p>&ldquo;We&rsquo;ve done everything from the boiler suit to the business suit.&rdquo;</p></blockquote>
+      <p class="reveal"><a class="link" href="about.html">About Marcie</a></p>
     </div>
   </div>
 </section>
-''' + cta() + "</main>\n" + FOOTER
+''' + cta("forest") + "</main>\n" + FOOTER
+
 
 # =====================================================================
 # SERVICES
 # =====================================================================
-services = head("Services | Ballast Water & Biofouling Compliance Consulting",
-                "Ballast water management compliance (IMO BWM Convention, USCG, EPA VGP), biofouling management, compliance program development, BWMS approvals and marine biosecurity expertise.",
-                "services.html", image="assets/img/ocean-surface.jpg") + header("services") + f'''
+def acc(key, title, summary, items, note=""):
+    lis = "".join(f"<li>{x}</li>" for x in items)
+    note_html = f'<p class="acc__note">{note}</p>' if note else ""
+    return f'''
+    <article class="acc__item reveal" id="{key}">
+      <h2 class="acc__title" id="{key}-title"><button type="button" class="acc__btn" aria-expanded="true" aria-controls="{key}-panel" data-acc-btn>
+        <span>{title}</span><i class="acc__icon" aria-hidden="true"></i></button></h2>
+      <p class="acc__summary">{summary}</p>
+      <section class="acc__panel" id="{key}-panel" aria-labelledby="{key}-title">
+        <div class="acc__inner"><div class="acc__body">
+          <ul class="ticks">{lis}</ul>{note_html}
+        </div></div>
+      </section>
+    </article>'''
+
+
+services = head("Services | Ballast Water &amp; Biofouling Management Consulting",
+                "Ballast water management (IMO BWM Convention, US Coast Guard, EPA Vessel General Permit), hull biofouling management, compliance programs and BWMS approvals for the maritime industry.",
+                "services.html") + header("services") + f'''
 <main id="main">
-<section class="hero page-hero on-dark">
-  <div class="hero__media"><img data-parallax="0.12" src="assets/img/ocean-surface.jpg" alt="The surface of the open ocean in soft evening light" width="2000" height="1333" fetchpriority="high"></div>
+<section class="page-hero page-hero--split on-dark">
   <div class="contours" aria-hidden="true"></div>
-  <div class="wrap hero__inner">
-    <div class="hero-in">
-      <p class="label">Services</p>
-      <h1 class="display">Maritime environmental compliance, <em>mapped.</em></h1>
-      <p class="lede">Everything we do supports one goal: helping our clients achieve and maintain compliance with global ballast water and biofouling management regulations.</p>
-      <div class="hero__meta coord"><span>Scoped per project &middot; Hourly consulting</span><span class="scroll-cue"><i></i>Scroll</span></div>
+  <div class="wrap page-hero__grid">
+    <div class="page-hero__copy">
+      <h1 class="h1">Specialized expertise. <em>Practical solutions.</em></h1>
+      <p class="lead">Environmental compliance consulting tailored to the operational and regulatory needs of the maritime industry.</p>
     </div>
   </div>
+  <div class="page-hero__media reveal-img">{pic("port-ship", "A loaded container ship alongside at a working port", "(min-width: 900px) 45vw, 100vw", eager=True)}</div>
 </section>
 
-<section class="section">
+<section class="section services-main">
   <div class="wrap">
-
-    <article class="service" id="ballast-water">
-      <div class="service__aside reveal">
-        <span class="n">01 / Core specialization</span>
-        <h2>Ballast Water Management</h2>
-        <p class="coord">IMO BWM Convention &middot; USCG &middot; EPA VGP</p>
-      </div>
-      <div class="service__body">
-        <figure class="service__img reveal"><img src="assets/img/port-ship.jpg" alt="Container ship alongside at a working port" width="1800" height="1200" loading="lazy"></figure>
-        <p class="lede reveal">Support for compliance with ballast water requirements under the International Maritime Organization, the US Coast Guard, the US Environmental Protection Agency, national and regional authorities and ship classification societies.</p>
-        <ul class="checklist checklist--2 reveal">
-          <li>IMO International Convention for the Control and Management of Ships&rsquo; Ballast Water and Sediments</li>
-          <li>US Coast Guard ballast water regulations</li>
-          <li>EPA Vessel General Permit (VGP)</li>
-          <li>National and regional requirements</li>
-          <li>Classification society requirements</li>
-          <li>Interpretation across trade routes and flag states</li>
-        </ul>
-        <div class="when reveal"><p class="label">When clients call</p><p>When you need a clear reading of which requirements apply to your vessels and trade, and a realistic plan for meeting them.</p></div>
-      </div>
-    </article>
-
-    <article class="service" id="biofouling">
-      <div class="service__aside reveal">
-        <span class="n">02 / Core specialization</span>
-        <h2>Biofouling Management</h2>
-        <p class="coord">Hull &amp; niche-area biosecurity</p>
-      </div>
-      <div class="service__body">
-        <figure class="service__img reveal"><img src="assets/img/reef.jpg" alt="Marine life gathered along an underwater reef wall" width="1600" height="1067" loading="lazy"></figure>
-        <p class="lede reveal">Biofouling on ship hulls is the other major way aquatic invasive species travel. We apply more than two decades of ballast water experience to the international biofouling management regulations, which we are helping to develop.</p>
-        <ul class="checklist reveal">
-          <li>Guidance on emerging international biofouling management requirements</li>
-          <li>Biofouling management planning and program development</li>
-          <li>Connection to technology, service providers and the scientific community</li>
-        </ul>
-        <div class="when reveal"><p class="label">When clients call</p><p>When you want to get ahead of biofouling requirements and build management practices that are practical, defensible and ready for what comes next.</p></div>
-      </div>
-    </article>
-
-    <article class="service" id="programs">
-      <div class="service__aside reveal">
-        <span class="n">03</span>
-        <h2>Compliance Program Development</h2>
-        <p class="coord">Plans &middot; Contingency &middot; Monitoring &middot; Training</p>
-      </div>
-      <div class="service__body">
-        <p class="lede reveal">Environmental compliance programs for ships, built to work in the real conditions on board.</p>
-        <ul class="checklist checklist--2 reveal">
-          <li>Ballast water management plans</li>
-          <li>Contingency planning</li>
-          <li>Compliance monitoring programs</li>
-          <li>Crew training programs</li>
-        </ul>
-      </div>
-    </article>
-
-    <article class="service" id="management">
-      <div class="service__aside reveal">
-        <span class="n">04</span>
-        <h2>Program &amp; Project Management</h2>
-        <p class="coord">Scope &middot; Coordinate &middot; Deliver</p>
-      </div>
-      <div class="service__body">
-        <p class="lede reveal">Compliance programs and projects managed with honesty and integrity, so your goals are met as efficiently and cost-effectively as possible.</p>
-        <p class="reveal">We coordinate among owners, technology suppliers, service providers and regulators so that each part of the work reaches the right party at the right time.</p>
-      </div>
-    </article>
-
-    <article class="service" id="approvals">
-      <div class="service__aside reveal">
-        <span class="n">05</span>
-        <h2>BWMS Approvals &amp; Risk Assessment</h2>
-        <p class="coord">Toxicology &middot; Dossiers &middot; Data</p>
-      </div>
-      <div class="service__body">
-        <p class="lede reveal">In-depth knowledge of chemical-based ballast water management systems, and of the chemistry, aquatic toxicology and human health questions that come with them.</p>
-        <ul class="checklist checklist--2 reveal">
-          <li>Approval support through classification societies and international administrations</li>
-          <li>Aquatic toxicology research for chemical-based systems</li>
-          <li>Environmental &amp; human health risk assessment of disinfection by-products</li>
-          <li>Dossier preparation and data analysis</li>
-          <li>Regulatory agency interactions</li>
-          <li>Onboard testing logistics</li>
-        </ul>
-      </div>
-    </article>
-
-    <article class="service" id="intelligence">
-      <div class="service__aside reveal">
-        <span class="n">06</span>
-        <h2>Regulatory Insight &amp; Access</h2>
-        <p class="coord">IMO &middot; Global network</p>
-      </div>
-      <div class="service__body">
-        <p class="lede reveal">Direct access to a subject matter expert who takes part at the International Maritime Organization and follows global biosecurity regulation as it develops.</p>
-        <p class="reveal">Clients also benefit from long-standing connections across the regulatory and scientific communities and from a global network of service providers.</p>
-      </div>
-    </article>
-
-  </div>
-</section>
-
-<section class="section section--ocean on-dark" id="approach">
-  <div class="contours contours--soft" aria-hidden="true"></div>
-  <div class="wrap">
-    <div class="section-head">
-      <div>
-        <p class="label reveal">Approach</p>
-        <h2 class="h2 reveal">Over, under, around <em>or through.</em></h2>
-      </div>
-      <p class="lede reveal" style="--d:.1s">There is always more than one route to the destination. Our work is finding the one that fits your vessel, your budget and your schedule.</p>
+    <div class="frameworks reveal" id="regulatory">
+      <h2 class="frameworks__title">Regulatory frameworks</h2>
+      <ul>
+        <li>International Maritime Organization (IMO)</li>
+        <li>IMO Ballast Water Management Convention</li>
+        <li>United States Coast Guard (USCG)</li>
+        <li>Environmental Protection Agency (EPA)</li>
+        <li>EPA Vessel General Permit</li>
+        <li>National and regional authorities</li>
+        <li>Classification societies</li>
+      </ul>
     </div>
-    <div class="steps">
-      <div class="step reveal"><span class="coord">Waypoint 01</span><h3>Explore</h3><p>Learn the terrain: your fleet, your systems, your trade and the regulations that apply.</p></div>
-      <div class="step reveal" style="--d:.1s"><span class="coord">Waypoint 02</span><h3>Listen</h3><p>Understand the pinch points, challenges and constraints that matter most to you.</p></div>
-      <div class="step reveal" style="--d:.2s"><span class="coord">Waypoint 03</span><h3>Chart</h3><p>Plot the most efficient, cost-effective route to compliance.</p></div>
-      <div class="step reveal" style="--d:.3s"><span class="coord">Waypoint 04</span><h3>Guide</h3><p>Lead the way there, and stay alongside as the rules continue to change.</p></div>
+    <div class="acc" data-acc>''' + acc(
+    "ballast-water", "Ballast Water Management",
+    "Guidance on meeting ballast water requirements set by the IMO, the US Coast Guard, the EPA, national and regional authorities and classification societies.",
+    ["IMO Ballast Water Management Convention", "US Coast Guard ballast water regulations", "EPA Vessel General Permit",
+     "Ballast water management plans", "Contingency planning", "Compliance monitoring and operational guidance"],
+    "When you need a clear reading of which requirements apply to your vessels and trade, and a practical plan for meeting them.") + acc(
+    "biofouling", "Biofouling Management",
+    "Hull biofouling is the other main pathway for aquatic invasive species. We help clients prepare as international requirements develop.",
+    ["Guidance on developing international biofouling management requirements", "Biofouling management planning and strategy",
+     "Marine biosecurity risk considerations", "Connections to technology developers, service providers and the scientific community"],
+    "Topography is involved in the development of international biofouling management regulations and brings more than two decades of ballast water experience to the work.") + acc(
+    "programs", "Compliance Programs and Project Management",
+    "Environmental compliance programs for ships, and the project management to put them in place.",
+    ["Environmental compliance program development", "Training programs", "Compliance monitoring programs",
+     "Coordination among owners, technology suppliers, service providers and regulators", "Implementation support"],
+    "Each engagement is scoped to the project and managed with honesty and integrity, so goals are met as efficiently and cost-effectively as possible.") + acc(
+    "approvals", "System Approvals and Risk Assessment",
+    "Support for ballast water management system approvals, with in-depth knowledge of chemical-based systems.",
+    ["BWMS approvals through classification societies and international administrations", "Aquatic toxicology for chemical-based systems",
+     "Environmental and human health risk assessment of disinfection by-products", "Dossier preparation and data analysis",
+     "Regulatory agency interactions", "Onboard testing logistics"]) + f'''
     </div>
   </div>
 </section>
 
-<section class="section section--sand">
-  <div class="wrap">
-    <div class="grid-2">
-      <div>
-        <p class="label reveal">Engagement</p>
-        <h2 class="h2 reveal">Scoped to the <em>project.</em></h2>
-        <p class="reveal">There are no fixed packages. Each engagement is scoped to your needs and billed at an hourly consulting rate, so you pay only for the expertise the work requires.</p>
-        <p class="reveal mb-0"><a class="link-arrow" href="contact.html">Discuss a project {ARROW}</a></p>
-      </div>
-      <div class="note-card reveal">
-        <h3 class="h3">Onboard sampling &amp; testing</h3>
-        <p>For hands-on compliance sampling and testing aboard ships, we refer clients to our trusted collaborator <strong>EnviroManagement, Inc.</strong>, an environmental services and consulting company co-founded by Marcie Merksamer in 2002.</p>
-      </div>
+<section class="section section--navy on-dark clients">
+  <div class="wrap clients__grid">
+    <h2 class="h2 reveal">Who we work with</h2>
+    <ul class="clients__list reveal">
+      <li>Shipowners and operators</li>
+      <li>Technology developers</li>
+      <li>Equipment manufacturers</li>
+      <li>Maritime service providers</li>
+      <li>Regulatory bodies</li>
+      <li>Industry associations, including BEMA</li>
+    </ul>
+  </div>
+</section>
+
+<section class="section section--sand engagement">
+  <div class="wrap engagement__grid">
+    <div class="reveal">
+      <h2 class="h3">How engagements work</h2>
+      <p>Every engagement is scoped to the project and billed at an hourly consulting rate. There are no fixed packages.</p>
+    </div>
+    <div class="reveal">
+      <h2 class="h3">Onboard sampling and testing</h2>
+      <p>Topography provides consulting and compliance guidance. For onboard compliance sampling and testing, we refer clients to EnviroManagement, Inc., the environmental services company Marcie co-founded in 2002.</p>
     </div>
   </div>
 </section>
-''' + cta() + "</main>\n" + FOOTER
+''' + cta("ocean") + "</main>\n" + FOOTER
+
 
 # =====================================================================
 # ABOUT
 # =====================================================================
 about = head("About Marcie Merksamer | Topography Consulting",
-             "Marcie M. Merksamer: 26 years in aquatic invasive species and ballast water management, Secretary-General of BEMA, IMO delegate and founder of Topography Consulting LLC.",
-             "about.html", image="assets/img/peaks-clouds.jpg") + header("about") + f'''
+             "Marcie M. Merksamer: environmental biologist with 26 years in aquatic invasive species and ballast water management, founder of Topography Consulting LLC and Secretary-General of BEMA.",
+             "about.html") + header("about") + f'''
 <main id="main">
-<section class="hero page-hero on-dark">
-  <div class="hero__media"><img data-parallax="0.12" src="assets/img/peaks-clouds.jpg" alt="Mountain peaks rising above a sea of clouds at first light" width="2400" height="1600" fetchpriority="high"></div>
+<section class="page-hero page-hero--about on-dark">
   <div class="contours" aria-hidden="true"></div>
-  <div class="wrap hero__inner">
-    <div class="hero-in">
-      <p class="label">About</p>
-      <h1 class="display">Driven by a passion for <em>the Earth.</em></h1>
-      <p class="lede">Topography Consulting was founded to protect what we explore, and to preserve it for the generations who will explore it next.</p>
-      <div class="hero__meta coord"><span>Founded by Marcie M. Merksamer</span><span class="scroll-cue"><i></i>Scroll</span></div>
+  <div class="wrap page-hero__grid">
+    <div class="page-hero__copy">
+      <p class="eyebrow">About</p>
+      <h1 class="h1">Marcie M. Merksamer</h1>
+      <p class="lead">Founder of Topography Consulting LLC. Environmental biologist. Twenty-six years helping the maritime industry manage aquatic invasive species.</p>
     </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="wrap grid-2 grid-2--wide-right">
-    <!-- Replace with Marcie's headshot when supplied: assets/img/marcie.jpg (4:5 crop recommended) -->
-    <figure class="portrait reveal">
-      <img src="assets/img/forest-lake.jpg" alt="A still alpine lake framed by evergreen forest" width="1600" height="1067" loading="lazy">
-      <figcaption><span class="coord" style="color:var(--sage)">Founder</span><span class="coord" style="color:var(--sage)">Sedona, AZ</span></figcaption>
+<section class="section bio">
+  <div class="wrap bio__grid">
+    <figure class="bio__portrait reveal">
+      {pic("marcie-merksamer", "Portrait of Marcie Merksamer", "(min-width: 900px) 300px, 70vw")}
     </figure>
-    <div>
-      <p class="label reveal">Founder</p>
-      <h2 class="h2 reveal">Marcie M. <em>Merksamer</em></h2>
+    <div class="bio__text">
+      <h2 class="h2 reveal">Professional background</h2>
       <div class="prose reveal">
         <p>Trained as an environmental biologist, Marcie has worked on aquatic invasive species and ballast water management for 26 years, 24 of them as an independent environmental consultant in the maritime sector.</p>
-        <p>Much of her ballast water work has involved helping clients obtain approvals for ballast water management systems (BWMS) through classification societies and international administrations. In managing those approvals she has carried out extensive research on aquatic toxicology for chemical-based systems, performed environmental and human health risk assessments of chemical disinfection by-products, and handled complex agency interactions, dossier preparation and data analysis.</p>
-        <p>She knows the logistics of scientific BWMS testing on board ships, as well as system operation, maintenance, crew interaction and crew training. Marcie now applies that expertise to current developments in the biofouling management sector. A primary goal in her work is to build productive working relationships among scientists, technology developers, industry and regulators.</p>
+        <p>Much of that work has involved helping clients obtain approvals for ballast water management systems through classification societies and international administrations. That has meant research on aquatic toxicology for chemical-based systems, environmental and human health risk assessments of disinfection by-products, dossier preparation, data analysis and complex agency interactions.</p>
+        <p>She also knows the practical side, from the logistics of testing systems on board ships to their operation, maintenance and crew training. She now applies that experience to biofouling management, with a constant aim: productive working relationships between scientists, technology developers, industry and regulators.</p>
       </div>
     </div>
   </div>
 </section>
 
-<section class="section section--sand">
-  <div class="wrap grid-2">
-    <div>
-      <p class="label reveal">Credentials</p>
-      <h2 class="h2 reveal">A record built <em>over decades.</em></h2>
-      <p class="reveal muted">Experience that spans technical, regulatory and industry-association work, at home and at the IMO.</p>
-    </div>
-    <ul class="credentials">
-      <li class="reveal"><span class="k">Current</span><span class="v"><b>Owner &amp; Founder</b><span>Topography Consulting LLC</span></span></li>
-      <li class="reveal"><span class="k">Since 2018</span><span class="v"><b>Secretary-General &amp; Co-founder</b><span>Biosecurity &amp; Environmental Marine Association (BEMA), a non-profit, technically based association with Consultative Status at the IMO. Marcie represents BEMA on the delegation to the IMO.</span></span></li>
-      <li class="reveal"><span class="k">2002 &ndash; present</span><span class="v"><b>Co-founder &amp; former Vice President</b><span>EnviroManagement, Inc., an environmental services and consulting company</span></span></li>
-      <li class="reveal"><span class="k">Education</span><span class="v"><b>B.S., Biological Sciences</b><span>Concentration in Environmental Science, California Polytechnic State University, San Luis Obispo</span></span></li>
-    </ul>
+<section class="story on-dark">
+  <div class="story__media reveal-img">{pic("peaks-clouds", "Mountain peaks rising above a sea of cloud at first light", "(min-width: 900px) 50vw, 100vw")}</div>
+  <div class="story__text">
+    <h2 class="h2 reveal">Why Topography</h2>
+    <p class="reveal">Marcie plans her own explorations on paper maps and charts, on land and at sea. Their lines show where the peaks and valleys are, how hard the climb will be and where the coastline offers safe harbor. They also show that there is more than one way to a destination: over, under, around or through.</p>
+    <p class="reveal">The ocean has a topography too, in the peaks and valleys of its waves. The name reflects a passion for the planet, from the mountains to the sea, and a commitment to protecting it.</p>
+    <blockquote class="quote reveal"><p>&ldquo;No problems; only solutions.&rdquo;</p></blockquote>
   </div>
 </section>
 
-<section class="band on-dark">
-  <img data-parallax="0.1" src="assets/img/coast-aerial.jpg" alt="Aerial view of surf meeting a pale sand shoreline" width="1400" height="2100" loading="lazy">
-  <div class="wrap">
-    <blockquote class="reveal">The ocean&rsquo;s surface has a topography too, in every swell and ripple.</blockquote>
-    <span class="coord reveal">Land &middot; Sea &middot; Everything between</span>
+<section class="section section--sand experience">
+  <div class="wrap experience__grid">
+    <div>
+      <h2 class="h2 reveal">Experience and qualifications</h2>
+      <p class="reveal">Twenty-six years in aquatic invasive species and ballast water management. Twenty-four years as an independent environmental consultant in the maritime sector.</p>
+    </div>
+    <ol class="timeline reveal">
+      <li><span class="timeline__when">Today</span><div><h3>Founder and Owner</h3><p>Topography Consulting LLC</p></div></li>
+      <li><span class="timeline__when">2018</span><div><h3>Co-founder and Secretary-General</h3><p>Biosecurity &amp; Environmental Marine Association (BEMA), a non-profit, technically based industry association with Consultative Status at the IMO. Marcie represents BEMA on the delegation to the IMO.</p></div></li>
+      <li><span class="timeline__when">2002</span><div><h3>Co-founder and former Vice President</h3><p>EnviroManagement, Inc., an environmental services and consulting company</p></div></li>
+      <li><span class="timeline__when">Education</span><div><h3>B.S., Biological Sciences</h3><p>Concentration in Environmental Science, California Polytechnic State University, San Luis Obispo</p></div></li>
+    </ol>
   </div>
 </section>
+''' + cta("navy") + "</main>\n" + FOOTER
 
-<section class="section">
-  <div class="wrap grid-2 grid-2--wide-left">
-    <div>
-      <p class="label reveal">The name</p>
-      <h2 class="h2 reveal">It&rsquo;s all about <em>exploration.</em></h2>
-      <div class="reveal">
-        <p>Nature, planet Earth, exploration and adventure. From the mountains to the sea and every environment in between, this planet is endlessly fascinating, and worth protecting, exploring and preserving for future generations.</p>
-        <p>Marcie still plans her explorations on old-school paper maps and charts, on land and at sea. Their lines show where the peaks and valleys lie, how hard the climb will be, where the coastline offers safe harbor and how deep the trenches run. They also show that there is always more than one way to reach a destination.</p>
-        <p>Many people think of topography only on land, but the ocean&rsquo;s surface has one too: the peaks and valleys of waves and the ripples drawn by wind and current. The name is a reminder that the journey continues, wherever it leads.</p>
-      </div>
-    </div>
-    <div>
-      <blockquote class="pull reveal">&ldquo;We&rsquo;ve done everything from the boiler suit to the business suit.&rdquo;<cite>Marcie Merksamer</cite></blockquote>
-      <blockquote class="pull reveal">&ldquo;No problems; only solutions.&rdquo;<cite>A guiding principle</cite></blockquote>
-    </div>
-  </div>
-</section>
-''' + cta(title='Let&rsquo;s chart the <em>path</em> together.') + "</main>\n" + FOOTER
 
 # =====================================================================
 # CONTACT
 # =====================================================================
+form_mode = "endpoint" if FORM_ENDPOINT else "email"
+form_attrs = (f'action="{FORM_ENDPOINT}" method="POST"' if FORM_ENDPOINT else 'action="#" method="get"')
+submit_label = "Send message" if FORM_ENDPOINT else "Continue in your email app"
+form_note = ("" if FORM_ENDPOINT else
+             f'<p class="form__note" id="form-note">This opens a pre-filled message in your email app. You can also write directly to <a href="mailto:{EMAIL}">{EMAIL}</a>.</p>')
+
+
+def field(fid, label, control, required=True):
+    req = '<span class="field__req" aria-hidden="true">*</span>' if required else '<span class="field__opt">Optional</span>'
+    return (f'<div class="field"><label for="{fid}">{label} {req}</label>{control}'
+            f'<p class="field__error" id="{fid}-error" hidden></p></div>')
+
+
 contact = head("Contact | Topography Consulting LLC",
-               "Contact Topography Consulting LLC about ballast water management, biofouling management and maritime environmental compliance. Based in Sedona, Arizona and serving clients worldwide.",
-               "contact.html", image="assets/img/open-ocean.jpg") + header("contact") + f'''
+               "Contact Topography Consulting LLC about ballast water management, biofouling management and maritime environmental compliance. Based in Sedona, Arizona, serving clients globally.",
+               "contact.html") + header("contact") + f'''
 <main id="main">
-<section class="hero page-hero on-dark">
-  <div class="hero__media"><img data-parallax="0.12" src="assets/img/open-ocean.jpg" alt="Calm open ocean meeting a pale horizon" width="2000" height="1333" fetchpriority="high"></div>
+<section class="page-hero page-hero--contact on-dark">
   <div class="contours" aria-hidden="true"></div>
-  <div class="wrap hero__inner">
-    <div class="hero-in">
-      <p class="label">Contact</p>
-      <h1 class="display">Every route starts with a <em>conversation.</em></h1>
-      <p class="lede">Tell us about your vessel, your system or the regulation you&rsquo;re facing, and we&rsquo;ll help you find the way forward.</p>
-      <div class="hero__meta coord"><span>34.8697&deg; N &middot; 111.7610&deg; W</span><span>Serving clients worldwide</span></div>
+  <div class="wrap page-hero__grid">
+    <div class="page-hero__copy">
+      <h1 class="h1">Let&rsquo;s discuss your compliance needs.</h1>
     </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="wrap contact-grid">
-    <div>
-      <p class="label reveal">Direct</p>
-      <ul class="contact-list reveal">
-        <li><span class="k">Email</span><a href="mailto:marcie@topographyllc.com">marcie@topographyllc.com</a></li>
-        <li><span class="k">Phone</span><a href="tel:+18053310740">+1 805-331-0740</a></li>
-        <li><span class="k">Mailing address</span><address>P.O. Box 20014<br>Sedona, AZ 86341<br>United States</address></li>
-      </ul>
-    </div>
-    <div>
-      <p class="label reveal">Send a message</p>
-      <form class="form reveal" data-mailto-form novalidate>
-        <div class="two">
-          <div class="field"><label for="name">Name</label><input id="name" name="name" autocomplete="name" required></div>
-          <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" required></div>
+<section class="section contact">
+  <div class="wrap contact__grid">
+    <dl class="contact__details reveal">
+      <div><dt>Email</dt><dd><a href="mailto:{EMAIL}">{EMAIL}</a></dd></div>
+      <div><dt>Phone</dt><dd><a href="tel:{PHONE_HREF}">{PHONE_DISPLAY}</a></dd></div>
+      <div><dt>Location</dt><dd>Sedona, Arizona<br><span>Serving clients globally</span></dd></div>
+    </dl>
+
+    <div class="contact__form reveal">
+      <h2 class="h3">Send a note</h2>
+      <form class="form" {form_attrs} data-form data-mode="{form_mode}" data-email="{EMAIL}" novalidate{' aria-describedby="form-note"' if not FORM_ENDPOINT else ''}>
+        <div class="form__row">
+          {field("name", "Full name", '<input id="name" name="name" type="text" autocomplete="name" required aria-describedby="name-error">')}
+          {field("company", "Company", '<input id="company" name="company" type="text" autocomplete="organization">', required=False)}
         </div>
-        <div class="two">
-          <div class="field"><label for="org">Organization</label><input id="org" name="org" autocomplete="organization"></div>
-          <div class="field"><label for="sector">You are a&hellip;</label>
-            <select id="sector" name="sector">
-              <option>Shipowner / operator</option>
-              <option>Technology developer</option>
-              <option>Equipment manufacturer</option>
-              <option>Maritime service provider</option>
-              <option>Regulatory body</option>
-              <option>Other</option>
-            </select>
-          </div>
-        </div>
-        <div class="field"><label for="topic">Topic</label>
-          <select id="topic" name="topic">
+        {field("email", "Email address", '<input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-error">')}
+        {field("interest", "Area of interest", """<select id="interest" name="interest">
             <option>Ballast water management</option>
             <option>Biofouling management</option>
-            <option>Compliance program development</option>
-            <option>BWMS approvals &amp; risk assessment</option>
+            <option>Regulatory compliance</option>
+            <option>Compliance programs and project management</option>
+            <option>System approvals and risk assessment</option>
             <option>Something else</option>
-          </select>
+          </select>""", required=False)}
+        {field("message", "Message", '<textarea id="message" name="message" rows="6" required aria-describedby="message-error"></textarea>')}
+        <div class="form__hp" aria-hidden="true"><label for="website">Leave this field empty</label><input id="website" name="_gotcha" type="text" tabindex="-1" autocomplete="off"></div>
+        <div class="form__actions">
+          <button class="btn btn--dark" type="submit">{submit_label} {ARROW}</button>
         </div>
-        <div class="field"><label for="message">How can we help?</label><textarea id="message" name="message" required></textarea></div>
-        <div><button class="btn" type="submit">Compose email {ARROW}</button></div>
-        <small>This opens a pre-filled message in your email app. Nothing is stored on this site.</small>
+        {form_note}
+        <p class="form__status" role="status" aria-live="polite" data-form-status></p>
       </form>
+      <noscript><p class="form__note">The form needs JavaScript. Please email <a href="mailto:{EMAIL}">{EMAIL}</a> or call <a href="tel:{PHONE_HREF}">{PHONE_DISPLAY}</a>.</p></noscript>
     </div>
   </div>
 </section>
 </main>
 ''' + FOOTER
 
-for name, html in [("index.html", home), ("services.html", services), ("about.html", about), ("contact.html", contact)]:
-    open(os.path.join(SITE, name), "w", encoding="utf-8").write(html)
-    print(name, len(html)//1024, "KB")
 
-open(os.path.join(SITE, "robots.txt"), "w").write(f"User-agent: *\nAllow: /\nSitemap: {URL}/sitemap.xml\n")
-open(os.path.join(SITE, "sitemap.xml"), "w").write(
-    '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
-    "".join(f"  <url><loc>{URL}/{p}</loc></url>\n" for p in ["", "services.html", "about.html", "contact.html"]) + "</urlset>\n")
+# ---------------------------------------------------------------------------
+for name, html in [("index.html", home), ("services.html", services), ("about.html", about), ("contact.html", contact)]:
+    html = re.sub(r"\n\s*\n\s*\n+", "\n\n", html)
+    open(os.path.join(SITE, name), "w", encoding="utf-8").write(html)
+    print(name, len(html) // 1024, "KB")
+
+PAGES = ["", "services.html", "about.html", "contact.html"]
+if PROD:
+    open(os.path.join(SITE, "robots.txt"), "w").write(f"User-agent: *\nAllow: /\nSitemap: {URL}/sitemap.xml\n")
+    open(os.path.join(SITE, "sitemap.xml"), "w").write(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        + "".join(f"  <url><loc>{URL}/{p}</loc></url>\n" for p in PAGES) + "</urlset>\n")
+else:
+    open(os.path.join(SITE, "robots.txt"), "w").write("# Staging build: keep out of search results.\nUser-agent: *\nDisallow: /\n")
+    if os.path.exists(os.path.join(SITE, "sitemap.xml")):
+        os.remove(os.path.join(SITE, "sitemap.xml"))
+print(f"built for {ENV}" + (f" at {URL}" if PROD else " (noindex, no sitemap)"))

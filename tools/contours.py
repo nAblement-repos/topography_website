@@ -85,7 +85,7 @@ def svg(name, W, H, nx, ny, hills, seed, nlevels, stroke=1, index_every=5, warp=
             pts = chaikin(line[::2] + ([line[-1]] if len(line)%2==0 else []), 1)
             d = "M" + " ".join(f"{x:.0f} {y:.0f}" for x, y in pts[::1])
             (paths_major if n % index_every == 0 else paths_minor).append(d)
-    s = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" preserveAspectRatio="xMidYMid slice" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">'
+    s = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" preserveAspectRatio="xMidYMid slice" fill="none" stroke="#B7C8BD" stroke-linecap="round" stroke-linejoin="round">'
          f'<path stroke-width="{stroke}" d="{" ".join(paths_minor)}"/>'
          f'<path stroke-width="{stroke*2.1:.2f}" d="{" ".join(paths_major)}"/></svg>')
     open(os.path.join(out, name), "w").write(s)
@@ -103,3 +103,43 @@ svg("contours-soft.svg", 1600, 900, 140, 80,
 svg("contours-peak.svg", 800, 800, 120, 120,
     [(400, 380, 190, 170, 1.0), (520, 300, 90, 80, 0.35), (300, 520, 140, 90, 0.2)],
     seed=3, nlevels=20, warp=0.3, index_every=4)
+
+# ---------------------------------------------------------------------------
+# Rings around the hero emblem. Contours start just outside the logo's outer
+# ring (r0) and grow more irregular with distance, so on scroll they read as
+# the emblem's own contour lines extending into a map. No lines inside r0.
+def rings(name, W=1600, H=1600, r0=150, step=28, n=30, seed=11, index_every=5):
+    rng = np.random.default_rng(seed)
+    nx = ny = 190
+    xs = np.linspace(0, W, nx); ys = np.linspace(0, H, ny)
+    X, Y = np.meshgrid(xs, ys)
+    cx, cy = W / 2, H / 2
+    R = np.hypot(X - cx, Y - cy)
+    noise = np.zeros_like(X)
+    for _ in range(7):
+        f = rng.uniform(1.2, 4.0, 2) / W * 2 * np.pi
+        ph = rng.uniform(0, 2 * np.pi, 2)
+        noise += rng.uniform(0.5, 1.0) * np.sin(X * f[0] + ph[0]) * np.cos(Y * f[1] + ph[1])
+    amp = np.clip((R - r0) / 520, 0, 1) ** 1.4 * 70          # near-circular close in
+    Z = R + amp * noise
+    # two distant summits so the outer field reads as terrain, not a target
+    for (hx, hy, s, a) in [(W * .13, H * .2, 150, 120), (W * .86, H * .78, 190, 150)]:
+        Z -= a * np.exp(-(((X - hx) / s) ** 2 + ((Y - hy) / s) ** 2))
+    minor, major = [], []
+    for k in range(n):
+        lv = r0 + k * step
+        for line in join(march(xs, ys, Z, lv)):
+            if len(line) < 6: continue
+            pts = chaikin(line[::2] + ([line[-1]] if len(line) % 2 == 0 else []), 1)
+            d = "M" + " ".join(f"{x:.0f} {y:.0f}" for x, y in pts)
+            (major if k % index_every == 0 else minor).append(d)
+    s = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" fill="none" stroke="#B7C8BD" stroke-linecap="round" stroke-linejoin="round">'
+         f'<path stroke-width="1" d="{" ".join(minor)}"/><path stroke-width="1.8" d="{" ".join(major)}"/></svg>')
+    open(os.path.join(out, name), "w").write(s)
+    print(name, len(s) // 1024, "KB")
+
+rings("contours-rings.svg")
+# Footer edge: a low ridge line running along the bottom of the page
+svg("contours-footer.svg", 1600, 260, 200, 34,
+    [(300, 300, 360, 120, 0.9), (1000, 320, 420, 140, 1.0), (1500, 290, 220, 110, 0.6)],
+    seed=5, nlevels=14, warp=0.6, index_every=4)
